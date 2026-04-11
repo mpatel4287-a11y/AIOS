@@ -168,7 +168,8 @@ def run_aiosys():
 def run_nlshell():
     console.print(Panel.fit(
         "[bold green]NL Shell[/bold green] — English → Linux commands\n"
-        "[dim]'!' prefix for raw bash. 'back' to return.[/dim]",
+        "[dim]'!' prefix for raw bash  |  'back' to return to menu\n"
+        "Supports: install, download, file ops, system commands[/dim]",
         border_style="green"
     ))
 
@@ -178,43 +179,155 @@ def run_nlshell():
     )
 
     SYSTEM = """You are a Linux bash expert on Ubuntu 24.04.
-Convert the user's English request into a bash command.
+Convert the user's English request into the correct bash command.
 
-Reply in EXACTLY this format and nothing else:
-CMD: <the bash command>
-EXPLAIN: <one line plain English explanation>
+Important rules:
+1. For installing packages use: sudo apt install -y <package>
+2. For downloading files use: wget <url> or curl -LO <url>
+3. For pip packages use: pip install <package>
+4. For updating system use: sudo apt update && sudo apt upgrade -y
+5. Always use -y flag for apt to avoid interactive prompts
+6. For multiple steps combine with && 
 
-If the command could delete or modify files, add this line:
-CONFIRM: yes
+Reply in EXACTLY this format — nothing else:
+CMD: <the complete bash command>
+EXPLAIN: <one line plain English>
+SUDO: yes   (only add this line if command needs sudo)
+CONFIRM: yes  (only add this line if command deletes or overwrites files)
 
-If the request is unclear, reply:
-ERROR: <what is unclear>
+If unclear reply:
+ERROR: <what is unclear>"""
 
-Never add extra text, greetings, or explanations outside this format."""
+    def run_live(cmd, use_sudo=False):
+        """Run command with live output — perfect for downloads and installs."""
+        console.print(f"\n[yellow]Running:[/yellow] {cmd}\n")
+        try:
+            process = subprocess.Popen(
+                cmd,
+                shell=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                cwd=os.path.expanduser("~")
+            )
+            # Stream output live
+            for line in iter(process.stdout.readline, ""):
+                print(line, end="", flush=True)
+            process.wait()
+            print()
+            if process.returncode == 0:
+                console.print("[green]  Done.[/green]")
+            else:
+                console.print(f"[red]  Exited with code {process.returncode}[/red]")
+            return process.returncode
+        except Exception as e:
+            console.print(f"[red]  Error: {e}[/red]")
+            return 1
+
+    def check_sudo_available():
+        """Check if user can use sudo."""
+        result = subprocess.run(
+            "sudo -n true", shell=True,
+            capture_output=True
+        )
+        return result.returncode == 0
 
     while True:
         try:
-            user = session.prompt("  shell → ").strip()
+            user = session.prompt("\n  shell → ").strip()
             if not user:
                 continue
-            if user.lower() in ("back", "exit"):
+            if user.lower() in ("back", "exit", "quit"):
                 break
 
-            # Raw bash passthrough
+            # Raw bash passthrough with !
             if user.startswith("!"):
                 raw = user[1:].strip()
                 if raw:
-                    out = subprocess.run(
-                        raw, shell=True,
-                        capture_output=True, text=True,
-                        cwd=os.path.expanduser("~")
-                    )
-                    if out.stdout:
-                        console.print(out.stdout)
-                    if out.stderr:
-                        console.print(f"[red]{out.stderr}[/red]")
+                    run_live(raw)
                 continue
 
+            # Quick shortcuts
+            low = user.lower()
+            if low in ("update", "upgrade", "update system"):
+                console.print("[dim]Updating system...[/dim]")
+                run_live("sudo apt update && sudo apt upgrade -y")
+                continue
+            if low.startswith("install ") and len(low.split()) == 2:
+                pkg = low.split()[1]
+                run_live(f"sudo apt install -y {pkg}")
+                continue
+            if low.startswith("pip install "):
+                run_live(user)
+                continue
+            if low.startswith("download "):
+                url = user.split(None, 1)[1]
+                run_live(f"wget '{url}' -P ~/Downloads/")
+                continue
+
+            # ── Quick shortcuts (bypass AI entirely for common tasks) ──
+            low = user.lower().strip()
+
+            # Open applications
+            open_apps = {
+                "firefox": "firefox",
+                "chrome": "google-chrome",
+                "terminal": "gnome-terminal",
+                "files": "nautilus",
+                "settings": "gnome-control-center",
+                "calculator": "gnome-calculator",
+                "text editor": "gedit",
+                "vs code": "code",
+                "vscode": "code",
+                "vlc": "vlc",
+}
+            for keyword, app_cmd in open_apps.items():
+                if keyword in low and any(
+                    w in low for w in ["open", "launch", "start", "run"]
+                ):
+                    console.print(f"[dim]Opening {keyword}...[/dim]")
+                    subprocess.Popen(
+            app_cmd, shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+            console.print(f"[green]  Launched {keyword}.[/green]")
+            user = None
+            break
+
+            if user is None:
+                continue
+
+            if low in ("update", "upgrade", "update system",
+           "update my system"):
+                run_live("sudo apt update && sudo apt upgrade -y")
+                continue
+
+            # install <package> — single word after install
+            if low.startswith("install ") and len(low.split()) == 2:
+                pkg = low.split()[1]
+                run_live(f"sudo apt install -y {pkg}")
+                continue
+
+            # uninstall / remove
+            if any(low.startswith(x) for x in
+                ["uninstall ", "remove ", "delete package "]):
+                pkg = low.split()[-1]
+                console.print(f"[dim]Removing {pkg}...[/dim]")
+                run_live(f"sudo apt remove -y {pkg}")
+                continue
+
+            if low.startswith("pip install "):
+                run_live(user)
+                continue
+
+            if low.startswith("download "):
+                url = user.split(None, 1)[1].strip()
+                run_live(f"wget -c '{url}' -P ~/Downloads/")
+                continue
+
+            # Ask AI to translate
             console.print("[dim]translating...[/dim]", end="\r")
             prompt   = f"{SYSTEM}\n\nUser request: {user}\n"
             response = ask(prompt, timeout=30)
@@ -223,54 +336,134 @@ Never add extra text, greetings, or explanations outside this format."""
                 console.print("[red]No response from Ollama.[/red]")
                 continue
 
-            # Parse response
-            cmd, explain, needs_confirm = None, "", False
+            # Parse
+            cmd            = None
+            explain        = ""
+            needs_confirm  = False
+            needs_sudo     = False
+
             for line in response.splitlines():
                 line = line.strip()
                 if line.startswith("CMD:"):
                     cmd = line[4:].strip()
                 elif line.startswith("EXPLAIN:"):
                     explain = line[8:].strip()
-                elif line.startswith("CONFIRM:"):
+                elif line.upper().startswith("CONFIRM:"):
                     needs_confirm = True
+                elif line.upper().startswith("SUDO:"):
+                    needs_sudo = True
                 elif line.startswith("ERROR:"):
-                    console.print(f"[yellow]Unclear:[/yellow] {line[6:].strip()}")
+                    console.print(
+                        f"[yellow]Unclear:[/yellow] "
+                        f"{line[6:].strip()}")
                     cmd = None
 
             if not cmd:
-                if not response.startswith("ERROR:"):
+                if response and not response.startswith("ERROR"):
                     console.print(f"[dim]{response}[/dim]")
                 continue
 
+            # ── Validate command before running ──
+            # Catch hallucinated apt package names
+            if "apt install" in cmd or "apt-get install" in cmd:
+                # Extract package name
+                parts = cmd.split()
+                pkg_candidates = [
+                    p for p in parts
+                    if not p.startswith("-")
+                    and p not in ("apt", "apt-get", "install",
+                                  "sudo", "-y", "&&")
+                ]
+                if pkg_candidates:
+                    pkg = pkg_candidates[-1]
+                    # Quick check if package exists
+                    check = subprocess.run(
+                        f"apt-cache show {pkg} 2>/dev/null | head -1",
+                        shell=True, capture_output=True, text=True
+                    )
+                    if not check.stdout.strip():
+                        console.print(
+                            f"[red]Package '{pkg}' not found "
+                            f"in apt.[/red]")
+                        # Try to find similar
+                        suggest = subprocess.run(
+                            f"apt-cache search {pkg} 2>/dev/null "
+                            f"| head -5",
+                            shell=True, capture_output=True, text=True
+                        )
+                        if suggest.stdout.strip():
+                            console.print(
+                                "[dim]Similar packages:[/dim]")
+                            console.print(suggest.stdout.strip())
+                        console.print(
+                            "[dim]Run '!apt-cache search <name>' "
+                            "to search manually.[/dim]")
+                        continue
+
+            # Auto-detect sudo need
+            if any(cmd.startswith(x) for x in
+                   ["sudo ", "apt ", "apt-get ", "systemctl ",
+                    "service ", "mount ", "umount "]):
+                needs_sudo = True
+
+            # Show the command
             console.print()
             console.print(Syntax(cmd, "bash", theme="monokai",
                                  background_color="default"))
             if explain:
                 console.print(f"[dim]{explain}[/dim]")
-            if needs_confirm:
-                console.print("[red bold]⚠  This command modifies files.[/red bold]")
 
-            confirm = input("  Run? [y/n] → ").strip().lower()
-            if confirm == "y":
+            # Warnings
+            if needs_sudo:
+                console.print("[yellow]  Requires sudo (admin password)[/yellow]")
+            if needs_confirm:
+                console.print("[red bold]  ⚠ This modifies or deletes files.[/red bold]")
+
+            # Confirm
+            confirm = input("\n  Run? [y/n] → ").strip().lower()
+            if confirm != "y":
+                console.print("[dim]  Skipped.[/dim]")
+                continue
+
+            # Detect if command is long-running
+            long_running = any(x in cmd for x in [
+                "apt ", "apt-get ", "wget ", "curl ", "pip ",
+                "npm ", "git clone", "make ", "cmake ",
+                "ffmpeg ", "tar ", "unzip ", "cp -r", "rsync "
+            ])
+
+            if long_running:
+                # Live streaming output for downloads/installs
+                run_live(cmd)
+            else:
+                # Captured output for quick commands
                 out = subprocess.run(
                     cmd, shell=True,
                     capture_output=True, text=True,
                     cwd=os.path.expanduser("~")
                 )
-                if out.stdout:
-                    console.print(Panel(out.stdout.strip(),
-                                        border_style="dim", title="output"))
-                if out.stderr:
-                    console.print(Panel(out.stderr.strip(),
-                                        border_style="red", title="error"))
-            else:
-                console.print("[dim]Skipped.[/dim]")
+                stdout = (out.stdout or "").strip()
+                stderr = (out.stderr or "").strip()
+
+                if stdout:
+                    console.print(Panel(stdout, border_style="dim",
+                                        title="output"))
+                if stderr:
+                    # Some commands write normal output to stderr
+                    # Only show as error if command actually failed
+                    if out.returncode != 0:
+                        console.print(Panel(stderr, border_style="red",
+                                            title="error"))
+                    else:
+                        console.print(Panel(stderr, border_style="dim",
+                                            title="info"))
+                if not stdout and not stderr:
+                    console.print("[green]  Done.[/green]")
 
         except KeyboardInterrupt:
-            console.print("\n[dim]Type 'back' to return.[/dim]")
+            console.print("\n[dim]  Ctrl+C — type 'back' to return.[/dim]")
         except EOFError:
             break
-
 # ─────────────────────────────────────────────
 # MODULE 3 — AI FILE MANAGER
 # ─────────────────────────────────────────────
